@@ -1,0 +1,39 @@
+# Python caches and environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local configuration and credentials
+config.json
+config.*.json
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Build products and release binaries
+.build/
+build/
+dist/
+*.spec
+*.exe
+*.dll
+*.zip
+
+# Editor and operating-system metadata
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Runtime files
+*.log
+*.tmp

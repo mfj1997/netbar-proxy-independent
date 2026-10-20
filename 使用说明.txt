@@ -1,0 +1,52 @@
+网吧代理 · 独立版
+
+双击“网吧代理独立版.exe”即可打开，无需安装 Python。已在本机 Windows 11 64 位验证。
+界面与代理内核均为重新编写，不依赖原 EXE、改名 Xray 或腾讯网吧 DLL。
+本程序没有卡密、机器绑定、试用次数或到期限制。
+
+开始使用
+1. 默认选择“直连转发”。点击“启动代理”，本机 SOCKS5 入口开始监听。
+2. 在需要代理且支持 SOCKS5 的应用中填写地址 127.0.0.1、端口 10808。
+   如果修改了本地端口，以界面显示为准。“复制地址”会复制 socks5://127.0.0.1:端口。
+3. 如需通过自己的服务器转发，选择 SOCKS5、HTTP CONNECT 或 HTTPS CONNECT 上游，
+   填入服务器地址、端口及所需认证信息，再启动代理。
+4. 点击“停止”关闭本工具的所有转发连接。关闭窗口会退出并停止。
+   点击“收起到托盘”则继续运行；双击托盘图标恢复窗口。
+
+转发能力
+本地入口始终为 SOCKS5，HTTP/HTTPS 选项表示远端服务器的协议。
+- 直连转发：TCP CONNECT 与 UDP ASSOCIATE；使用本机当前网络，不改变出口。
+- SOCKS5 上游：TCP 转发、可选用户名密码认证；UDP 需要上游支持 UDP ASSOCIATE。
+- HTTP CONNECT 上游：TCP 转发、可选 Basic 认证。
+- HTTPS CONNECT 上游：经过 TLS 的 HTTP CONNECT，校验证书与主机名；只转发 TCP。
+- 支持 SOCKS5 IPv4、IPv6 和域名地址；不实现 BIND、UDP 分片或 GSSAPI。
+
+界面状态的含义
+“本地代理已就绪”只表示本机监听已启动。
+SOCKS5“检测上游连接”检查连接与认证，不访问外部目标。
+HTTP/HTTPS 检测仅检查 TCP/TLS 连接，真正 CONNECT 与认证在应用发起转发时验证。
+发送/接收统计来自实际转发的数据；运行记录显示错误，不记录密码或访问地址。
+
+配置与数据
+服务器及端口等非敏感设置在启动时保存在 EXE 同目录的 config.json。
+用户名、密码不保存到文件，重新打开程序需要重新输入。
+SOCKS5 和普通 HTTP 协议本身不加密认证数据；需加密上游链路时选择 HTTPS。
+本地代理只绑定环回地址，不向局域网开放，也不自动修改系统代理或游戏进程。
+
+与网吧活动的关系
+这是独立网络转发工具。它不提供代理服务器账号，也不包含网吧认证或活动资格功能。
+仅启动本程序不会让 PUBG 自动走代理，也不代表网吧活动已经开启。
+需要代理的应用必须支持并使用本地 SOCKS5 入口。
+本次未连接用户的真实上游服务器、游戏或活动服务；验证使用本机测试服务。
+
+源码
+source 文件夹包含完整源代码和构建脚本。使用 Python 3.13 64 位：
+  python -m pip install -r source\requirements.txt
+  python source\app.py
+或在 PowerShell 中运行 source\build.ps1 重新构建 EXE。
+源码与打包依赖许可见 LICENSE.txt、THIRD_PARTY_NOTICES.txt 和 licenses 文件夹。
+
+运行本地集成测试（在本文件所在目录执行）
+  python -m pip install -r tests\requirements-dev.txt
+  python -m unittest discover -s tests -p "test_*.py" -v
+测试使用本机 TCP/UDP 服务和临时测试证书，不修改系统证书。
