@@ -52,6 +52,15 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(config.mode, "direct")
         self.assertFalse(self.path.exists())
 
+    def test_rejects_upstream_pointing_at_own_listener(self):
+        for host in ("127.0.0.1", "localhost"):
+            with self.subTest(host=host), self.assertRaises(ValueError):
+                validate_config(ProxyConfig(mode="socks5", upstream_host=host, upstream_port=10808))
+        separate = validate_config(ProxyConfig(mode="socks5", upstream_host="127.0.0.2", upstream_port=10808))
+        self.assertEqual(separate.upstream_host, "127.0.0.2")
+        separate_v6 = validate_config(ProxyConfig(listen_host="::1", mode="socks5", upstream_host="127.0.0.1", upstream_port=10808))
+        self.assertEqual(separate_v6.listen_host, "::1")
+
     def test_rejects_invalid_schema_and_secret_fields(self):
         bad_values = [
             [], {"schema_version": True}, {"schema_version": "1"},

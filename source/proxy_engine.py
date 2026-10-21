@@ -579,11 +579,21 @@ class ProxyEngine:
                     raise ProxyError("本机代理仅支持免认证接入。")
                 writer.write(b"\x05\x00")
                 await writer.drain()
-                request = await reader.readexactly(4)
+                try:
+                    request = await reader.readexactly(4)
+                except asyncio.IncompleteReadError as exc:
+                    # A client may close after method negotiation (for example
+                    # our readiness check). Only a partial request is malformed.
+                    if not exc.partial:
+                        return None
+                    raise
                 if request[0] != 5 or request[2] != 0:
                     raise ProxyError("客户端 SOCKS5 请求无效。")
                 return request[1], await _read_address(reader, request[3])
-            command, (host, port) = await asyncio.wait_for(greeting(), self.config.timeout)
+            request = await asyncio.wait_for(greeting(), self.config.timeout)
+            if request is None:
+                return
+            command, (host, port) = request
             request_received = True
             if command == 1:
                 upstream_reader, upstream_writer = await self._connect(host, port)

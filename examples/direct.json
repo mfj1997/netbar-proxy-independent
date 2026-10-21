@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "listen_host": "127.0.0.1",
+  "listen_port": 10808,
+  "mode": "direct",
+  "upstream_host": "",
+  "upstream_port": 1080,
+  "timeout": 10,
+  "allow_private_targets": true
+}

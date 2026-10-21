@@ -2,15 +2,17 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from datetime import datetime
+import json
 from pathlib import Path
 import sys
 
 from PySide6.QtCore import Qt, QTimer, QPoint
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QIntValidator, QPainter, QPen, QPixmap, QPolygon
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QFormLayout, QFrame, QHBoxLayout,
-    QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
+    QApplication, QComboBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
+    QLabel, QLineEdit, QMainWindow, QMenu, QPlainTextEdit,
     QPushButton, QScrollArea, QSystemTrayIcon, QTabWidget,
     QVBoxLayout, QWidget,
 )
@@ -145,10 +147,12 @@ class MainWindow(QMainWindow):
         self.last_state = ""
         self._exit_pending = False
         self._last_config = ProxyConfig()
-        self.setWindowTitle("网吧代理 · 独立版")
+        self._config_error = False
+        self._applying_config = False
+        self.setWindowTitle("网吧代理 · 独立版 v1.1.0")
         self.setWindowIcon(app_icon())
-        self.resize(570, 750)
-        self.setMinimumSize(540, 660)
+        self.resize(620, 800)
+        self.setMinimumSize(580, 700)
         if preview:
             self.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
         self._build()
@@ -170,7 +174,7 @@ class MainWindow(QMainWindow):
         titles = QVBoxLayout()
         titles.setSpacing(4)
         titles.addWidget(label("网吧代理", "title"))
-        titles.addWidget(label("独立内核  /  无卡密  /  无到期限制", "subtitle"))
+        titles.addWidget(label("v1.1.0  /  独立内核  /  无卡密", "subtitle"))
         header.addLayout(titles)
         header.addStretch()
         mini = QPushButton("收起到托盘")
@@ -198,6 +202,21 @@ class MainWindow(QMainWindow):
         self.route_label = label("本机应用  →  独立代理  →  直连网络", "subtitle")
         route_layout.addWidget(self.route_label)
         status_layout.addWidget(route)
+        checks = QFormLayout()
+        checks.setVerticalSpacing(6)
+        checks.setHorizontalSpacing(16)
+        self.check_labels = {}
+        for key, title in (
+            ("listener_check", "本地代理"),
+            ("upstream_check", "上游检测"),
+            ("route_check", "目标 TLS"),
+            ("entitlement", "网吧权益"),
+        ):
+            value = label("未检测", "muted", True)
+            value.setAccessibleName(title + "状态")
+            self.check_labels[key] = value
+            checks.addRow(label(title, "muted"), value)
+        status_layout.addLayout(checks)
         stats = QHBoxLayout()
         self.metrics = {}
         for key, title, initial in (
@@ -218,6 +237,7 @@ class MainWindow(QMainWindow):
         outer.addWidget(status_panel)
 
         tabs = QTabWidget()
+        self.tabs = tabs
         config_shell = QScrollArea()
         config_shell.setWidgetResizable(True)
         config_shell.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -239,9 +259,10 @@ class MainWindow(QMainWindow):
         self.mode.currentIndexChanged.connect(self.mode_changed)
         form.addRow("转发方式", self.mode)
         local_row = QHBoxLayout()
-        local_row.addWidget(label("127.0.0.1  :"))
+        self.local_host_label = label("127.0.0.1  :")
+        local_row.addWidget(self.local_host_label)
         self.local_port = PortEdit()
-        self.local_port.setRange(1024, 65535)
+        self.local_port.setRange(1, 65535)
         self.local_port.setValue(10808)
         self.local_port.setAccessibleName("本地 SOCKS5 端口")
         local_row.addWidget(self.local_port)
@@ -282,12 +303,57 @@ class MainWindow(QMainWindow):
         self.mode_note = label("", "muted", True)
         settings_layout.addWidget(self.mode_note)
         config_layout.addWidget(settings_panel)
-
-        self.feedback = label("", "muted", True)
-        self.feedback.setMinimumHeight(32)
-        config_layout.addWidget(self.feedback)
+        file_buttons = QHBoxLayout()
+        self.import_button = QPushButton("导入配置")
+        self.import_button.clicked.connect(self.import_config)
+        self.save_button = QPushButton("保存配置")
+        self.save_button.clicked.connect(self.save_config)
+        self.defaults_button = QPushButton("恢复默认配置")
+        self.defaults_button.clicked.connect(self.restore_defaults)
+        for button in (self.import_button, self.save_button, self.defaults_button):
+            file_buttons.addWidget(button)
+        config_layout.addLayout(file_buttons)
+        config_layout.addWidget(label("配置文件只保存非敏感设置；用户名和密码需在本次会话填写。", "muted", True))
         config_layout.addStretch()
         tabs.addTab(config_shell, "代理控制")
+
+        diagnostics_tab = QWidget()
+        diagnostics_layout = QVBoxLayout(diagnostics_tab)
+        diagnostics_layout.setContentsMargins(0, 10, 0, 0)
+        diagnostic_panel, diagnostic_layout = panel()
+        diagnostic_layout.addWidget(label("通过当前代理检测实际转发", "section"))
+        diagnostic_layout.addWidget(label(
+            "填写你要测试的 HTTPS / TLS 服务。检测会经过当前本地代理和所选上游，验证目标证书与 TLS 握手。", "muted", True,
+        ))
+        target_row = QHBoxLayout()
+        self.target_host = QLineEdit()
+        self.target_host.setPlaceholderText("目标域名或 IP（不含 https://）")
+        self.target_host.setAccessibleName("TLS 检测目标地址")
+        self.target_port = PortEdit()
+        self.target_port.setRange(1, 65535)
+        self.target_port.setValue(443)
+        self.target_port.setFixedWidth(95)
+        self.target_port.setAccessibleName("TLS 检测目标端口")
+        target_row.addWidget(self.target_host)
+        target_row.addWidget(self.target_port)
+        diagnostic_layout.addLayout(target_row)
+        self.route_check_button = QPushButton("检测实际转发")
+        self.route_check_button.clicked.connect(self.check_route)
+        diagnostic_layout.addWidget(self.route_check_button)
+        self.route_feedback = label("启动代理后可检测。不会自动连接预设网站。", "muted", True)
+        diagnostic_layout.addWidget(self.route_feedback)
+        diagnostic_layout.addWidget(label("此检测仅验证所选 TCP / TLS 路径，不验证 UDP、游戏连接或网吧权益。", "muted", True))
+        diagnostics_layout.addWidget(diagnostic_panel)
+        self.export_button = QPushButton("导出诊断报告")
+        self.export_button.clicked.connect(self.export_diagnostics)
+        diagnostics_layout.addWidget(self.export_button, alignment=Qt.AlignmentFlag.AlignLeft)
+        diagnostics_layout.addWidget(label("报告不包含账号、密码、服务器地址或访问目标。", "muted", True))
+        diagnostics_layout.addStretch()
+        diagnostics_shell = QScrollArea()
+        diagnostics_shell.setWidgetResizable(True)
+        diagnostics_shell.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        diagnostics_shell.setWidget(diagnostics_tab)
+        tabs.addTab(diagnostics_shell, "连接诊断")
 
         log_tab = QWidget()
         logs = QVBoxLayout(log_tab)
@@ -303,6 +369,10 @@ class MainWindow(QMainWindow):
         logs.addWidget(clear, alignment=Qt.AlignmentFlag.AlignRight)
         tabs.addTab(log_tab, "运行记录")
         outer.addWidget(tabs, stretch=1)
+
+        self.feedback = label("", "muted", True)
+        self.feedback.setMinimumHeight(24)
+        outer.addWidget(self.feedback)
 
         controls = QHBoxLayout()
         controls.setSpacing(12)
@@ -322,6 +392,11 @@ class MainWindow(QMainWindow):
             "本工具提供网络转发；网吧活动资格需在官方服务中确认。",
             "muted", True,
         ))
+        for widget in (self.local_port, self.host, self.remote_port, self.username, self.password):
+            widget.textChanged.connect(self.config_changed)
+        self.mode.currentIndexChanged.connect(self.config_changed)
+        self.target_host.textChanged.connect(self.route_target_changed)
+        self.target_port.textChanged.connect(self.route_target_changed)
 
     def _create_tray(self):
         self.tray = None
@@ -350,28 +425,106 @@ class MainWindow(QMainWindow):
     def _load(self):
         try:
             config = ProxyConfig() if self.preview else load_settings(self.config_path)
+            self._apply_config(config)
+        except (ValueError, OSError, TypeError):
+            self._config_error = True
+            self.feedback.setText("配置文件无法读取，已阻止启动且保留原文件。请导入有效配置或明确恢复默认配置。")
+        self.mode_changed()
+
+    def _apply_config(self, config: ProxyConfig):
+        self._applying_config = True
+        try:
+            self._last_config = config
             self.mode.setCurrentIndex(max(0, self.mode.findData(config.mode)))
             self.local_port.setValue(config.listen_port)
+            self.local_host_label.setText(f"{config.listen_host}  :")
             self.host.setText(config.upstream_host)
             self.remote_port.setValue(config.upstream_port)
-            self._last_config = config
-        except (ValueError, OSError, TypeError):
-            self.feedback.setText("配置文件无法读取，已使用默认配置。重新启动代理可保存新配置。")
+            self.username.clear()
+            self.password.clear()
+            self._config_error = False
+        finally:
+            self._applying_config = False
+        self.service.invalidate_diagnostics()
+        self.route_feedback.setText("尚未检测目标。启动代理后可检测实际转发。")
         self.mode_changed()
 
     def current_config(self):
         mode = self.mode.currentData()
-        return validate_config(ProxyConfig(
-            listen_host="127.0.0.1",
+        return validate_config(replace(
+            self._last_config,
             listen_port=self.local_port.value(),
             mode=mode,
             upstream_host=self.host.text().strip() if mode != "direct" else "",
             upstream_port=self.remote_port.value() if mode != "direct" else 1080,
             username=self.username.text() if mode != "direct" else "",
             password=self.password.text() if mode != "direct" else "",
-            timeout=10,
-            allow_private_targets=True,
         ))
+
+    def config_changed(self, *_):
+        if self._applying_config or self.service.state in ("starting", "running", "stopping"):
+            return
+        self.service.invalidate_diagnostics()
+        self.route_feedback.setText("代理配置已修改，请启动后重新检测目标。")
+        if not self._config_error:
+            self.feedback.setText("配置已修改，检测结果已重置。")
+        if hasattr(self, "timer"):
+            self.refresh()
+
+    def route_target_changed(self, *_):
+        self.service.invalidate_route_diagnostics()
+        self.route_feedback.setText("检测目标已修改，请重新检测。")
+        if hasattr(self, "timer"):
+            self.refresh()
+
+    def restore_defaults(self):
+        if self.service.state in ("starting", "running", "stopping"):
+            return
+        self._apply_config(ProxyConfig())
+        self.feedback.setText("已选择默认配置；原文件未修改。点击启动或保存配置后才写入。")
+        self.refresh()
+
+    def import_config(self):
+        if self.service.state in ("starting", "running", "stopping"):
+            return
+        filename, _ = QFileDialog.getOpenFileName(self, "导入非敏感代理配置", "", "JSON 配置 (*.json)")
+        if not filename:
+            return
+        try:
+            if not Path(filename).is_file():
+                raise OSError("Selected file is unavailable")
+            config = load_settings(Path(filename))
+            self._apply_config(config)
+            self.feedback.setText("配置已导入；认证信息需重新填写。启动或保存时才写入当前配置文件。")
+        except (ValueError, OSError, TypeError):
+            self.feedback.setText("导入失败：请检查配置格式、版本和字段。当前配置及原文件未修改。")
+        self.refresh()
+
+    def save_config(self):
+        if self._config_error or self.service.state in ("starting", "running", "stopping"):
+            return
+        try:
+            config = self.current_config()
+            save_settings(config, self.config_path)
+            self._last_config = config
+            self.feedback.setText("非敏感配置已保存，未保存用户名或密码。")
+        except (ValueError, TypeError) as exc:
+            self.feedback.setText(str(exc))
+        except OSError:
+            self.feedback.setText("配置保存失败，请检查文件夹是否可写；原配置未被替换。")
+
+    def export_diagnostics(self):
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "导出诊断报告", "proxy-diagnostics.json", "JSON 报告 (*.json)",
+        )
+        if not filename:
+            return
+        try:
+            report = self.service.diagnostic_report()
+            Path(filename).write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            self.feedback.setText("诊断报告已导出，不含账号、密码和网络地址。")
+        except (OSError, TypeError, ValueError):
+            self.feedback.setText("诊断报告保存失败，请选择可写的文件夹。")
 
     def mode_changed(self):
         mode = self.mode.currentData()
@@ -392,6 +545,11 @@ class MainWindow(QMainWindow):
         self.route_label.setText(f"本机应用  →  独立代理  →  {end}")
 
     def start_proxy(self):
+        if self.service.state in ("starting", "running", "stopping"):
+            return
+        if self._config_error:
+            self.feedback.setText("配置读取失败，尚未允许替换原文件。请先导入有效配置或恢复默认配置。")
+            return
         try:
             config = self.current_config()
             if not self.preview:
@@ -401,16 +559,22 @@ class MainWindow(QMainWindow):
                     self.add_log("配置未能保存；本次仍可运行。")
             self._last_config = config
             self.feedback.setText("")
-            self.service.start(config)
+            self.route_feedback.setText("尚未检测目标；本地代理就绪后可检测实际转发。")
+            if not self.service.start(config):
+                self.feedback.setText("代理正在运行或停止，请稍后重试。")
         except (ValueError, OSError, TypeError) as exc:
             self.feedback.setText(str(exc))
         self.refresh()
 
     def stop_proxy(self):
         self.service.stop()
+        self.feedback.setText("正在停止代理，检测结果已重置。")
+        self.route_feedback.setText("代理已停止或正在停止，请启动后重新检测目标。")
         self.refresh()
 
     def check_upstream(self):
+        if self._config_error:
+            return
         try:
             config = self.current_config()
             if self.service.check_upstream_async(config):
@@ -419,15 +583,50 @@ class MainWindow(QMainWindow):
         except (ValueError, OSError, TypeError) as exc:
             self.feedback.setText(str(exc))
 
+    def check_route(self):
+        try:
+            if self.service.check_route_async(self.target_host.text().strip(), self.target_port.value()):
+                self.route_feedback.setText("正在通过当前代理检测目标 TLS 连接…")
+            else:
+                self.route_feedback.setText("请先启动代理，或等待当前检测结束。")
+        except (ValueError, OSError, TypeError):
+            self.route_feedback.setText("请填写有效的目标域名或 IP，以及 1 到 65535 之间的端口。")
+        self.refresh()
+
     def copy_address(self):
         snapshot = self.service.snapshot()
         port = snapshot.get("listen_port") if snapshot.get("state") == "running" else self.local_port.value()
-        address = f"socks5://127.0.0.1:{port}"
+        host = snapshot.get("listen_host") if snapshot.get("state") == "running" else self._last_config.listen_host
+        authority = f"[{host}]" if ":" in host else host
+        address = f"socks5://{authority}:{port}"
         QApplication.clipboard().setText(address)
         self.feedback.setText(f"已复制 {address}")
 
     def add_log(self, message: str):
         self.log_view.appendPlainText(f"{datetime.now():%H:%M:%S}  {message}")
+
+    @staticmethod
+    def check_text(check: dict, *, checking: bool = False) -> tuple[str, str]:
+        if checking:
+            return "检测中…", "#91651f"
+        if check.get("stage") == "not_required":
+            return "直连模式 · 无上游", "#557084"
+        if check.get("ok") is None:
+            return "未检测", "#557084"
+        if check.get("ok") is not True:
+            return "未通过 · 查看检测提示", "#ad4439"
+        title = {
+            "listener": "本地 SOCKS5 握手通过",
+            "transport": "传输连接通过 · 尚未验证转发",
+            "authentication": "SOCKS5 连接与认证通过",
+            "configuration": "配置有效 · 尚未验证目标连接",
+            "tunnel": "目标隧道建立 · 尚未验证 TLS",
+            "tls": "目标 TLS 握手与证书通过",
+        }.get(check.get("stage"), "检测通过")
+        latency = check.get("latency_ms")
+        if isinstance(latency, (int, float)) and not isinstance(latency, bool) and latency >= 0:
+            title += f" · {latency:.0f} ms"
+        return title, "#287552"
 
     def refresh(self):
         snap = self.service.snapshot()
@@ -436,8 +635,13 @@ class MainWindow(QMainWindow):
             self.add_log(entry)
         check = self.service.poll_check_result()
         if check is not None:
-            self.check_button.setEnabled(True)
             self.feedback.setText(check.get("message", "检测已结束。"))
+        route_result = self.service.poll_route_result()
+        if route_result is not None:
+            self.route_feedback.setText(route_result.get("message", "检测已结束。"))
+        if self.last_state in ("starting", "running", "stopping") and state in ("stopped", "failed"):
+            self.feedback.setText((snap.get("error") or "代理运行失败，请查看运行记录。") if state == "failed" else "本地代理已停止；检测结果已重置。")
+            self.route_feedback.setText("当前代理未运行，请启动后重新检测目标。")
         title, color = {
             "stopped": ("代理未启动", "#8d9fac"),
             "starting": ("正在启动", "#b27a27"),
@@ -445,29 +649,55 @@ class MainWindow(QMainWindow):
             "stopping": ("正在停止", "#b27a27"),
             "failed": ("启动或运行失败", "#ad4439"),
         }.get(state, ("代理未启动", "#8d9fac"))
+        if self._config_error:
+            title, color = "配置需要修复", "#ad4439"
         self.status_title.setText(title)
         self.status_dot.setStyleSheet(f"color:{color}")
         if state == "running":
             port = snap.get("listen_port") or self._last_config.listen_port
-            detail = f"SOCKS5  127.0.0.1:{port}"
+            host = snap.get("listen_host") or self._last_config.listen_host
+            authority = f"[{host}]" if ":" in host else host
+            detail = f"SOCKS5  {authority}:{port}"
             if self._last_config.mode == "direct":
                 detail += "  ·  当前网络直连出口"
             else:
-                detail += "  ·  上游在实际连接时验证转发"
+                detail += "  ·  可在连接诊断中验证实际转发"
         elif state == "failed":
             detail = snap.get("error") or "请查看运行记录，检查端口和上游配置后重试。"
         elif state == "starting":
-            detail = "正在绑定本地端口。"
+            detail = "正在绑定端口并验证本地 SOCKS5 握手。"
         elif state == "stopping":
             detail = "正在关闭本工具的连接并释放端口。"
         else:
             detail = "选择转发方式，然后启动本机代理。"
+        if self._config_error:
+            detail = "原配置文件已保留，导入有效配置或恢复默认配置后才可启动。"
         self.status_detail.setText(detail)
+        for key in ("listener_check", "upstream_check", "route_check"):
+            result = snap.get(key) or {}
+            checking = (
+                (key == "listener_check" and state == "starting")
+                or (key == "upstream_check" and self.service.checking)
+                or (key == "route_check" and self.service.route_checking)
+            )
+            text, check_color = self.check_text(result, checking=checking)
+            self.check_labels[key].setText(text)
+            self.check_labels[key].setStyleSheet(f"color:{check_color}")
+            self.check_labels[key].setToolTip(str(result.get("message", "")))
+        self.check_labels["entitlement"].setText("未验证 · 需官方服务确认")
+        self.check_labels["entitlement"].setStyleSheet("color:#91651f")
         busy = state in ("starting", "running", "stopping")
-        self.start_button.setEnabled(not busy)
+        self.start_button.setEnabled(not busy and not self._config_error)
         self.stop_button.setEnabled(state in ("starting", "running"))
         for widget in (self.mode, self.local_port, self.host, self.remote_port, self.username, self.password):
             widget.setEnabled(not busy)
+        for widget in (self.import_button, self.defaults_button):
+            widget.setEnabled(not busy)
+        self.save_button.setEnabled(not busy and not self._config_error)
+        self.check_button.setEnabled(not self._config_error and not self.service.checking and state not in ("starting", "stopping"))
+        self.route_check_button.setEnabled(state == "running" and not self.service.route_checking)
+        self.target_host.setEnabled(not self.service.route_checking)
+        self.target_port.setEnabled(not self.service.route_checking)
         for key, widget in self.metrics.items():
             value = snap.get(key, 0)
             widget.setText(str(value) if key == "active_connections" else size_text(value))

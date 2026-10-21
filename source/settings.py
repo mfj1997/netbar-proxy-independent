@@ -92,6 +92,13 @@ def validate_config(config: ProxyConfig) -> ProxyConfig:
     upstream_host = _hostname(
         config.upstream_host, allow_empty=config.mode == "direct"
     )
+    if config.mode != "direct" and upstream_port == listen_port:
+        try:
+            local_upstream = ipaddress.ip_address(upstream_host) == address
+        except ValueError:
+            local_upstream = upstream_host.lower() == "localhost" and str(address) in ("127.0.0.1", "::1")
+        if local_upstream:
+            raise ValueError("上游不能指向本机代理自身的端口，请填写独立的上游服务地址。")
     if (
         isinstance(config.timeout, bool)
         or not isinstance(config.timeout, (int, float))
@@ -121,6 +128,11 @@ def validate_config(config: ProxyConfig) -> ProxyConfig:
     # Keep the core's protocol-specific validation in the same call path.
     result.validate()
     return result
+
+
+def validate_target(host: object, port: object) -> tuple[str, int]:
+    """Validate an explicitly selected TLS test destination without resolving it."""
+    return _hostname(host), _integer_port(port, "检测目标端口")
 
 
 def load_settings(path: str | os.PathLike[str] | None = None) -> ProxyConfig:
